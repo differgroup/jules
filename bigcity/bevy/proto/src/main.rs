@@ -1,7 +1,7 @@
 // --- IMPORTS ---
 use bevy::prelude::*;
 use bevy::image::ImageSampler;
-use bevy::render::camera::{RenderTarget};
+use bevy::render::camera::RenderTarget; // Removed unused imports
 use bevy::render::render_resource::{
     AsBindGroup, Extent3d, ShaderRef, TextureDescriptor, TextureDimension, TextureFormat,
     TextureUsages,
@@ -35,6 +35,10 @@ impl Particle {
         }
     }
 }
+
+// --- DEBUGGING COMPONENT ---
+#[derive(Component)]
+struct DebugText;
 
 // --- MAIN APP ---
 fn main() {
@@ -114,20 +118,18 @@ fn setup(
         }
     }
 
-    // --- THIS IS THE CORRECTED PART ---
     let texture_descriptor = TextureDescriptor {
         label: None,
         size,
         dimension: TextureDimension::D2,
-        format: TextureFormat::Rgba8UnormSrgb, // Use sRGB format
+        format: TextureFormat::Rgba8UnormSrgb,
         mip_level_count: 1,
         sample_count: 1,
         usage: TextureUsages::TEXTURE_BINDING
             | TextureUsages::COPY_DST
             | TextureUsages::RENDER_ATTACHMENT,
-        view_formats: &[TextureFormat::Rgba8UnormSrgb], // Use sRGB format
+        view_formats: &[TextureFormat::Rgba8UnormSrgb],
     };
-    // --- END OF CORRECTION ---
 
     let image_a = Image {
         data: Some(image_data.clone()),
@@ -159,13 +161,31 @@ fn setup(
     // This camera renders the final result TO the screen.
     commands.spawn(Camera2d::default());
 
+    // --- THIS IS THE CORRECTED PART ---
+    // Spawn the debug text using the correct component structure.
+    commands.spawn((
+        DebugText,
+        Node {
+            position_type: PositionType::Absolute,
+            top: Val::Px(5.0),
+            left: Val::Px(5.0),
+            ..default()
+        },
+        Text("Debug Text".into()), // Text is a tuple struct containing a String
+        TextFont {
+            font_size: 20.0,
+            ..default()
+        },
+        TextColor(Color::WHITE),
+    ));
+    // --- END OF CORRECTION ---
+
     let material = sim_materials.add(SimulationMaterial {
         source_image: h_image_a.clone(),
     });
 
     let quad_handle = meshes.add(Rectangle::new(size.width as f32, size.height as f32));
 
-    // Spawn a tuple of components for the simulation quad.
     commands.spawn((
         Mesh2d(quad_handle.into()),
         MeshMaterial2d(material),
@@ -173,7 +193,6 @@ fn setup(
         Visibility::default(),
     ));
 
-    // The sprite that displays the final texture on screen.
     commands.spawn((
         Sprite {
             image: h_image_b.clone(),
@@ -213,7 +232,6 @@ fn ping_pong(
         }
     }
 
-    // Filter for the specific sprite we want to update.
     for mut sprite in sprite_query.iter_mut().filter(|s| s.custom_size.is_some()) {
         sprite.image = ping_pong.write.clone();
     }
@@ -240,33 +258,38 @@ fn switch_particle_type(
 fn paint_on_texture(
     buttons: Res<ButtonInput<MouseButton>>,
     q_window: Query<&Window, With<PrimaryWindow>>,
-    q_camera: Query<(&Camera, &GlobalTransform)>,
+    mut q_debug_text: Query<&mut Text, With<DebugText>>,
     mut images: ResMut<Assets<Image>>,
     ping_pong: Res<PingPong>,
     selected_particle: Res<SelectedParticle>,
 ) {
+    let Ok(mut text) = q_debug_text.single_mut() else { return };
+    let Ok(window) = q_window.single() else { return };
+
     if !buttons.pressed(MouseButton::Left) {
+        // --- THIS IS THE CORRECTED PART ---
+        text.0 = "".to_string();
+        // --- END OF CORRECTION ---
         return;
     }
-    
-    let Ok(window) = q_window.single() else { return };
-    let Some((camera, camera_transform)) = q_camera.iter().find(|(c, _)| c.order == 0) else {
-        return;
-    };
 
-    if let Some(world_pos) = window
-        .cursor_position()
-        .and_then(|cursor| camera.viewport_to_world(camera_transform, cursor).ok())
-        .map(|ray| ray.origin.truncate())
-    {
-        let texture_pos = (world_pos
-            + Vec2::new(
-                SIMULATION_WIDTH as f32 / 2.0,
-                SIMULATION_HEIGHT as f32 / 2.0,
-            ))
-        .as_uvec2();
+    if let Some(cursor_pos) = window.cursor_position() {
+        let window_size = Vec2::new(window.width(), window.height());
+        let normalized_pos = cursor_pos / window_size;
 
-        if let Some(image) = images.get_mut(&ping_pong.read) {
+        let texture_pos = Vec2::new(
+            normalized_pos.x * SIMULATION_WIDTH as f32,
+            (1.0 - normalized_pos.y) * SIMULATION_HEIGHT as f32,
+        ).as_uvec2();
+
+        // --- THIS IS THE CORRECTED PART ---
+        text.0 = format!(
+            "Cursor: {:.1}, {:.1}\nTex Coords: {}, {}",
+            cursor_pos.x, cursor_pos.y, texture_pos.x, texture_pos.y
+        );
+        // --- END OF CORRECTION ---
+
+        if let Some(image) = images.get_mut(&ping_pong.write) {
             if let Some(data) = &mut image.data {
                 for y_offset in -BRUSH_SIZE..=BRUSH_SIZE {
                     for x_offset in -BRUSH_SIZE..=BRUSH_SIZE {
@@ -281,5 +304,9 @@ fn paint_on_texture(
                 }
             }
         }
+    } else {
+        // --- THIS IS THE CORRECTED PART ---
+        text.0 = "Cursor outside window".to_string();
+        // --- END OF CORRECTION ---
     }
 }
