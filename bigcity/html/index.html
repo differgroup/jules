@@ -1,0 +1,484 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Noita-like Falling Sand (single file)</title>
+<style>
+  :root{--bg:#111;--panel:#0f1721;--muted:#94a3b8}
+  html,body{height:100%;margin:0;background:var(--bg);color:#e6eef6;font-family:Inter,system-ui,Segoe UI,Roboto,Arial}
+  .wrap{display:grid;grid-template-columns:1fr 320px;gap:12px;padding:12px;height:100%}
+  canvas{background:#000;border-radius:8px;display:block;width:100%;height:100%;box-shadow:0 8px 30px rgba(2,6,23,.6)}
+  .panel{background:linear-gradient(180deg,#071022 0%, #071726 100%);padding:12px;border-radius:10px;overflow:auto}
+  h1{font-size:16px;margin:0 0 8px}
+  label{display:block;margin:8px 0 4px;color:var(--muted);font-size:12px}
+  .row{display:flex;gap:8px;align-items:center}
+  button, select, input[type=range]{background:#0b1220;border:1px solid #172231;color:#dbeafe;padding:6px;border-radius:6px}
+  .tools{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin:8px 0}
+  .palette{display:flex;flex-wrap:wrap;gap:6px}
+  .sw{width:36px;height:36px;border-radius:6px;display:flex;align-items:center;justify-content:center;cursor:pointer;border:2px solid transparent}
+  .sw.active{outline:2px solid #7dd3fc}
+  footer{font-size:12px;color:var(--muted);margin-top:12px}
+  .small{font-size:13px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div>
+    <canvas id="c"></canvas>
+  </div>
+  <div class="panel">
+    <h1>Noita-like Falling Sand — single HTML file</h1>
+    <div class="row small"><div>Grid:</div><div id="info" style="margin-left:auto"></div></div>
+
+    <label>Tool / Material</label>
+    <div class="palette" id="palette"></div>
+
+    <label>Brush Size <span id="bsizeLabel">8</span></label>
+    <input id="brush" type="range" min="1" max="32" value="8">
+
+    <label>Simulation Speed</label>
+    <input id="speed" type="range" min="1" max="8" value="2">
+
+    <div class="row" style="margin-top:8px">
+      <button id="pause">Pause</button>
+      <button id="step">Step</button>
+      <button id="clear">Clear</button>
+    </div>
+
+    <label>Quality / Size</label>
+    <div class="row">
+      <select id="res">
+        <option value="2">Small (low cpu)</option>
+        <option value="1">Medium</option>
+        <option value="0.5">Large (high quality)</option>
+      </select>
+      <button id="resize">Apply</button>
+    </div>
+
+    <label>Export / Import (text)</label>
+    <div class="row">
+      <button id="export">Export</button>
+      <button id="importBtn">Import</button>
+    </div>
+
+    <label>Extras</label>
+    <div class="tools">
+      <button id="gravity">Toggle Gravity</button>
+      <button id="wind">Toggle Wind</button>
+      <button id="debug">Toggle Debug</button>
+      <button id="saveImg">Save PNG</button>
+    </div>
+
+    <footer>
+      Controls: Left-click paint, Right-click erase, Middle-click pick. Hold Shift to spray (random).<br>
+      Tip: Try lava + oil + water for interesting reactions. This is a simplified demo — not a full Noita clone.
+    </footer>
+  </div>
+</div>
+
+<script>
+/*
+ Single-file falling sand inspired by Noita.
+ - Grid simulation with types, density, temperature
+ - Sand, Stone, Water, Lava, Fire, Oil, Smoke, Gas, Wood, Bomb
+ - Mouse tools and UI controls
+ - Optimized by using typed arrays and single pass scanning
+*/
+
+// ------------------------------------------------------------------
+// Configuration & grid
+// ------------------------------------------------------------------
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d', { alpha: false });
+const infoEl = document.getElementById('info');
+let DPR = Math.min(window.devicePixelRatio || 1, 2);
+
+// default resolution scale (cell size)
+let pixelScale = 1; // will be set by res selection
+let gridW, gridH, canvasW, canvasH;
+let paused = false;
+let gravityOn = true;
+let windOn = false;
+let debug = false;
+
+// Grid data stored in typed arrays for speed
+let typeArr, tempArr, lifeArr, updatedArr; // Uint8/Uint16/Float32
+
+// Simulation parameters
+const MAX_TYPES = 32;
+const TYPE = {
+  EMPTY:0, SAND:1, STONE:2, WATER:3, LAVA:4, FIRE:5, WOOD:6, SMOKE:7, OIL:8, GAS:9, BOMB:10
+};
+
+const meta = [];
+function defineType(id, props){ meta[id]=props }
+
+// Define materials
+defineType(TYPE.EMPTY,{name:'Empty',color:'#000000',density:0,walkable:true});
+defineType(TYPE.SAND,{name:'Sand',color:'#C2B280',density:5,solid:true,fall:true});
+defineType(TYPE.STONE,{name:'Stone',color:'#7a7f87',density:10,solid:true});
+defineType(TYPE.WATER,{name:'Water',color:'#3da9ff',density:3,liquid:true,flow:true});
+defineType(TYPE.LAVA,{name:'Lava',color:'#ff6a00',density:2,liquid:true,hot:true,flow:true});
+defineType(TYPE.FIRE,{name:'Fire',color:'#ffcf66',density:0,hot:true,lifetime:30,gas:true});
+defineType(TYPE.WOOD,{name:'Wood',color:'#8b5a2b',density:6,flammable:true});
+defineType(TYPE.SMOKE,{name:'Smoke',color:'#77777f',density:1,gas:true});
+defineType(TYPE.OIL,{name:'Oil',color:'#201f1f',density:2,liquid:true,flammable:true});
+defineType(TYPE.GAS,{name:'Gas',color:'#9adbad',density:0,gas:true});
+defineType(TYPE.BOMB,{name:'Bomb',color:'#222222',density:8,solid:true,explode:true});
+
+// palette list order
+const paletteOrder = [TYPE.SAND,TYPE.WATER,TYPE.LAVA,TYPE.OIL,TYPE.FIRE,TYPE.WOOD,TYPE.STONE,TYPE.BOMB,TYPE.SMOKE,TYPE.GAS];
+
+// UI bindings
+const paletteEl = document.getElementById('palette');
+const brushEl = document.getElementById('brush');
+const bsizeLabel = document.getElementById('bsizeLabel');
+const speedEl = document.getElementById('speed');
+const pauseBtn = document.getElementById('pause');
+const stepBtn = document.getElementById('step');
+const clearBtn = document.getElementById('clear');
+const resSel = document.getElementById('res');
+const resizeBtn = document.getElementById('resize');
+const exportBtn = document.getElementById('export');
+const importBtn = document.getElementById('importBtn');
+const gravityBtn = document.getElementById('gravity');
+const windBtn = document.getElementById('wind');
+const debugBtn = document.getElementById('debug');
+const saveImgBtn = document.getElementById('saveImg');
+const speedLabel = document.getElementById('speed');
+
+let currentTool = TYPE.SAND;
+let brushSize = parseInt(brushEl.value,10);
+let simSpeed = parseInt(speedEl.value,10);
+
+bsizeLabel.textContent = brushSize;
+
+// Create palette buttons
+function buildPalette(){
+  paletteEl.innerHTML='';
+  for(const t of paletteOrder){
+    const b = document.createElement('div');
+    b.className='sw'+(t===currentTool?' active':'');
+    b.title = meta[t].name;
+    b.style.background = meta[t].color;
+    b.onclick = ()=>{ currentTool=t; document.querySelectorAll('.sw').forEach(x=>x.classList.remove('active')); b.classList.add('active'); }
+    b.oncontextmenu = ()=>{ currentTool = TYPE.EMPTY; document.querySelectorAll('.sw').forEach(x=>x.classList.remove('active')); return false; }
+    paletteEl.appendChild(b);
+  }
+}
+buildPalette();
+
+// ------------------------------------------------------------------
+// Init / Resize grid
+// ------------------------------------------------------------------
+function initGrid(){
+  const cw = Math.floor(window.innerWidth - 360);
+  const ch = window.innerHeight - 24;
+  canvasW = Math.max(200, cw);
+  canvasH = Math.max(200, ch);
+  // pixelScale selected by UI
+  const scale = pixelScale * DPR;
+  gridW = Math.floor(canvasW / scale);
+  gridH = Math.floor(canvasH / scale);
+  canvas.width = gridW;
+  canvas.height = gridH;
+  canvas.style.width = (gridW / DPR) + 'px';
+  canvas.style.height = (gridH / DPR) + 'px';
+
+  // allocate typed arrays
+  const size = gridW * gridH;
+  typeArr = new Uint8Array(size);
+  tempArr = new Float32Array(size);
+  lifeArr = new Uint16Array(size);
+  updatedArr = new Uint8Array(size);
+
+  // clear
+  for(let i=0;i<size;i++){ typeArr[i]=TYPE.EMPTY; tempArr[i]=0; lifeArr[i]=0; updatedArr[i]=0; }
+
+  drawWelcome();
+}
+
+// initial scale selection
+function applyRes(){
+  const val = parseFloat(resSel.value);
+  // val is scale factor; smaller => bigger grid
+  // We'll map to pixelScale inverse
+  pixelScale = val;
+  initGrid();
+}
+
+applyRes();
+
+// ------------------------------------------------------------------
+// Helpers: index math
+// ------------------------------------------------------------------
+function inBounds(x,y){ return x>=0 && x<gridW && y>=0 && y<gridH }
+function idx(x,y){ return x + y*gridW }
+
+// ------------------------------------------------------------------
+// Painting & mouse
+// ------------------------------------------------------------------
+let mouse = {x:0,y:0,down:false,btn:0};
+canvas.addEventListener('pointerdown', e=>{ canvas.setPointerCapture(e.pointerId); mouse.down=true; mouse.btn=e.button; });
+canvas.addEventListener('pointerup', e=>{ canvas.releasePointerCapture(e.pointerId); mouse.down=false });
+canvas.addEventListener('pointermove', e=>{ const rect=canvas.getBoundingClientRect(); const scale = DPR; const sx = (e.clientX-rect.left)*scale; const sy = (e.clientY-rect.top)*scale; mouse.x = Math.floor(sx); mouse.y = Math.floor(sy); });
+canvas.addEventListener('contextmenu', e=>e.preventDefault());
+canvas.addEventListener('auxclick', e=>e.preventDefault());
+
+// pick with middle button
+canvas.addEventListener('pointerdown', e=>{ if(e.button===1){ const i = idx(mouse.x, mouse.y); currentTool = typeArr[i]||TYPE.EMPTY; buildPalette(); } });
+
+function paintAt(x,y,tool,size){
+  for(let dy=-size;dy<=size;dy++){
+    for(let dx=-size;dx<=size;dx++){
+      const px = x+dx, py = y+dy;
+      if(!inBounds(px,py)) continue;
+      if(dx*dx+dy*dy > size*size) continue;
+      const i = idx(px,py);
+      typeArr[i] = tool;
+      if(tool===TYPE.LAVA) tempArr[i]=1000;
+      if(meta[tool] && meta[tool].lifetime) lifeArr[i]=meta[tool].lifetime;
+    }
+  }
+}
+
+// ------------------------------------------------------------------
+// Simulation step
+// ------------------------------------------------------------------
+function stepOnce(){
+  const width = gridW, height = gridH;
+  updatedArr.fill(0);
+  // We'll scan bottom-up so particles fall naturally
+  for(let y=height-1;y>=0;y--){
+    const rowBase = y*width;
+    for(let x=0;x<width;x++){
+      const i = rowBase + x;
+      if(updatedArr[i]) continue;
+      const t = typeArr[i];
+      if(t===TYPE.EMPTY) continue;
+
+      // Pre-get neighbours
+      const below = (y+1<height) ? i+width : -1;
+      const left = (x-1>=0) ? i-1 : -1;
+      const right = (x+1<width) ? i+1 : -1;
+      const belowLeft = (y+1<height && x-1>=0) ? below-1 : -1;
+      const belowRight = (y+1<height && x+1<width) ? below+1 : -1;
+
+      // SAND behavior: fall down if empty, swap with lighter liquids, or fall through gases
+      if(t===TYPE.SAND){
+        // try down (treat gas as passable)
+        if(below>=0 && (typeArr[below]===TYPE.EMPTY || (meta[typeArr[below]] && meta[typeArr[below]].gas))){ swapCells(i,below); updatedArr[below]=1; }
+        else if(below>=0 && meta[typeArr[below]] && meta[typeArr[below]].liquid){ swapCells(i,below); updatedArr[below]=1; }
+        else {
+          // try diagonal
+          const dir = Math.random()<0.5?-1:1;
+          const diag = dir<0?belowLeft:belowRight;
+          if(diag>=0 && (typeArr[diag]===TYPE.EMPTY || (meta[typeArr[diag]] && meta[typeArr[diag]].gas))){ swapCells(i,diag); updatedArr[diag]=1; }
+          else if(diag>=0 && meta[typeArr[diag]] && meta[typeArr[diag]].liquid){ swapCells(i,diag); updatedArr[diag]=1; }
+        }
+        continue;
+      }
+
+      // LIQUIDS: Water, Lava, Oil, Gas
+      if(meta[t] && meta[t].liquid){
+        // flow down (gas counts as passable)
+        if(below>=0 && (typeArr[below]===TYPE.EMPTY || (meta[typeArr[below]] && meta[typeArr[below]].gas))){ swapCells(i,below); updatedArr[below]=1; continue; }
+        // spread sideways (can also displace gas)
+        const order = Math.random()<0.5?[left,right]:[right,left];
+        let moved=false;
+        for(const nb of order){
+          if(nb>=0 && (typeArr[nb]===TYPE.EMPTY || (meta[typeArr[nb]] && meta[typeArr[nb]].gas))){ swapCells(i,nb); updatedArr[nb]=1; moved=true; break; }
+        }
+        if(moved) continue;
+        // liquids interact: lava + water -> stone
+        if(t===TYPE.LAVA){
+          if(below>=0 && typeArr[below]===TYPE.WATER){ typeArr[below]=TYPE.STONE; tempArr[below]=0; updatedArr[below]=1; typeArr[i]=TYPE.EMPTY; continue; }
+          if(left>=0 && typeArr[left]===TYPE.WATER){ typeArr[left]=TYPE.STONE; tempArr[left]=0; updatedArr[left]=1; typeArr[i]=TYPE.EMPTY; continue; }
+          if(right>=0 && typeArr[right]===TYPE.WATER){ typeArr[right]=TYPE.STONE; tempArr[right]=0; updatedArr[right]=1; typeArr[i]=TYPE.EMPTY; continue; }
+        }
+        continue;
+      }
+
+      // FIRE: burns flammable neighbors, decays
+      if(t===TYPE.FIRE){
+        lifeArr[i] = Math.max(0, lifeArr[i]-1);
+        if(lifeArr[i]===0){ typeArr[i]=TYPE.SMOKE; lifeArr[i]=30; updatedArr[i]=1; continue; }
+        // try ignite neighbors
+        const ns = [below,left,right,belowLeft,belowRight];
+        for(const nb of ns){ if(nb>=0 && meta[typeArr[nb]] && meta[typeArr[nb]].flammable){ if(Math.random()<0.25){ typeArr[nb]=TYPE.FIRE; lifeArr[nb]=50; updatedArr[nb]=1; } } }
+        // fire turns oil -> fire immediately sometimes
+        if(below>=0 && typeArr[below]===TYPE.OIL && Math.random()<0.5){ typeArr[below]=TYPE.FIRE; lifeArr[below]=40; updatedArr[below]=1; }
+        continue;
+      }
+
+      // WOOD: can burn when adjacent to fire
+      if(t===TYPE.WOOD){
+        const ns = [below,left,right,belowLeft,belowRight];
+        let ign=false;
+        for(const nb of ns){ if(nb>=0 && typeArr[nb]===TYPE.FIRE) { if(Math.random()<0.35) ign=true; } }
+        if(ign){ typeArr[i]=TYPE.FIRE; lifeArr[i]=80; updatedArr[i]=1; }
+        continue;
+      }
+
+      // BOMB: explode when heated or hit by fire
+      if(t===TYPE.BOMB){
+        // if adjacent to fire or hot cell
+        const ns = [below,left,right,belowLeft,belowRight];
+        let hot=false;
+        for(const nb of ns){ if(nb>=0 && meta[typeArr[nb]] && meta[typeArr[nb]].hot) hot=true; if(nb>=0 && typeArr[nb]===TYPE.FIRE) hot=true; }
+        if(hot && Math.random()<0.6){ explodeAt(x,y,8); typeArr[i]=TYPE.EMPTY; updatedArr[i]=1; }
+        continue;
+      }
+
+      // SMOKE/GAS: rise upward
+      if(meta[t] && meta[t].gas){
+        const up = (y-1>=0)? i-gridW : -1;
+        if(up>=0 && typeArr[up]===TYPE.EMPTY){ swapCells(i,up); updatedArr[up]=1; continue; }
+        // spread sideways occasionally
+        const side = Math.random()<0.5?left:right;
+        if(side>=0 && typeArr[side]===TYPE.EMPTY){ swapCells(i,side); updatedArr[side]=1; continue; }
+        continue;
+      }
+
+      // default: do nothing
+    }
+  }
+}
+
+function swapCells(a,b){
+  const ta = typeArr[a]; const tb = typeArr[b];
+  typeArr[b]=ta; typeArr[a]=tb;
+  // swap temps & life
+  const taT = tempArr[a]; tempArr[a]=tempArr[b]; tempArr[b]=taT;
+  const taL = lifeArr[a]; lifeArr[a]=lifeArr[b]; lifeArr[b]=taL;
+}
+
+function explodeAt(cx,cy,radius){
+  const rng = () => (Math.random()*2-1);
+  for(let y=cy-radius; y<=cy+radius; y++){
+    for(let x=cx-radius; x<=cx+radius; x++){
+      if(!inBounds(x,y)) continue;
+      const dx = x-cx, dy = y-cy;
+      const d2 = dx*dx+dy*dy;
+      if(d2 > radius*radius) continue;
+      const i = idx(x,y);
+      // high chance to set empty, sometimes to fire or smoke
+      if(Math.random() < 0.85 - (d2/(radius*radius))){
+        if(Math.random()<0.4) typeArr[i]=TYPE.FIRE, lifeArr[i]=40;
+        else typeArr[i]=TYPE.SMOKE, lifeArr[i]=60;
+      } else {
+        typeArr[i]=TYPE.EMPTY;
+      }
+    }
+  }
+}
+
+// ------------------------------------------------------------------
+// Render
+// ------------------------------------------------------------------
+function render(){
+  // create image data directly from typeArr
+  const w = gridW, h = gridH;
+  const img = ctx.createImageData(w,h);
+  const data = img.data;
+  for(let i=0;i<w*h;i++){
+    const t = typeArr[i];
+    let col = '#000000';
+    if(t && meta[t]) col = meta[t].color;
+    // parse hex to rgb
+    const c = hexToRgb(col);
+    const di = i*4;
+    if(t===TYPE.EMPTY){ data[di]=0; data[di+1]=0; data[di+2]=0; data[di+3]=255; }
+    else { data[di]=c.r; data[di+1]=c.g; data[di+2]=c.b; data[di+3]=255; }
+    // small debug overlay: show life as blueish
+    if(debug && lifeArr[i]>0){ data[di+2] = Math.min(255, data[di+2] + lifeArr[i]*2); }
+  }
+  ctx.putImageData(img,0,0);
+}
+
+function hexToRgb(hex){
+  hex = hex.replace('#','');
+  const bigint = parseInt(hex,16);
+  return {r:(bigint>>16)&255, g:(bigint>>8)&255, b:bigint&255};
+}
+
+function drawWelcome(){
+  // paint a simple background pattern
+  for(let y=gridH-30; y<gridH; y++){
+    for(let x=0; x<gridW; x++){
+      const i = idx(x,y);
+      typeArr[i] = (Math.random()<0.06)?TYPE.STONE:TYPE.EMPTY;
+    }
+  }
+}
+
+// ------------------------------------------------------------------
+// Main loop
+// ------------------------------------------------------------------
+let last = performance.now();
+function loop(now){
+  const dt = now-last; last=now;
+  if(!paused){
+    // apply mouse painting
+    if(mouse.down){
+      const mx = Math.floor(mouse.x);
+      const my = Math.floor(mouse.y);
+      if(mouse.btn===2){ // right click: erase
+        paintAt(mx,my,TYPE.EMPTY,brushSize);
+      } else {
+        paintAt(mx,my,currentTool,brushSize);
+      }
+    }
+    // run multiple simulation steps per frame depending on simSpeed
+    const steps = simSpeed;
+    for(let s=0;s<steps;s++) stepOnce();
+  }
+  render();
+  // update info
+  infoEl.textContent = `W:${gridW} H:${gridH} FPS:${Math.round(1000/dt)||0} Brush:${brushSize}`;
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+
+// ------------------------------------------------------------------
+// UI events
+// ------------------------------------------------------------------
+brushEl.oninput = ()=>{ brushSize = parseInt(brushEl.value,10); bsizeLabel.textContent = brushSize; };
+speedEl.oninput = ()=>{ simSpeed = parseInt(speedEl.value,10); };
+pauseBtn.onclick = ()=>{ paused = !paused; pauseBtn.textContent = paused? 'Resume':'Pause'; };
+stepBtn.onclick = ()=>{ if(paused) stepOnce(); };
+clearBtn.onclick = ()=>{ typeArr.fill(TYPE.EMPTY); tempArr.fill(0); lifeArr.fill(0); };
+resizeBtn.onclick = ()=>{ applyRes(); };
+exportBtn.onclick = ()=>{ const data = {w:gridW,h:gridH,types:Array.from(typeArr)}; const txt = JSON.stringify(data); prompt('Copy simulation data', txt); };
+importBtn.onclick = ()=>{ const txt = prompt('Paste simulation data'); try{ const data = JSON.parse(txt); if(data.w && data.h && data.types){ if(data.w===gridW && data.h===gridH){ typeArr = Uint8Array.from(data.types); } else { alert('Imported size does not match current grid. Resize first.'); } } }catch(e){ alert('Invalid data'); } };
+gravityBtn.onclick = ()=>{ gravityOn = !gravityOn; gravityBtn.textContent = gravityOn? 'Gravity:On':'Gravity:Off'; };
+windBtn.onclick = ()=>{ windOn = !windOn; windBtn.textContent = windOn? 'Wind:On':'Wind:Off'; };
+debugBtn.onclick = ()=>{ debug = !debug; debugBtn.textContent = debug? 'Debug:On':'Debug:Off'; };
+saveImgBtn.onclick = ()=>{ // upscale canvas to display size and export PNG
+  const out = document.createElement('canvas'); out.width = gridW; out.height = gridH; const c2 = out.getContext('2d'); c2.drawImage(canvas,0,0); const url = out.toDataURL('image/png'); const a = document.createElement('a'); a.href=url; a.download='sandbox.png'; a.click(); };
+
+// keyboard
+window.addEventListener('keydown', e=>{
+  if(e.key===' ') { paused = !paused; pauseBtn.textContent = paused? 'Resume':'Pause'; e.preventDefault(); }
+});
+
+// Adjust canvas on window resize
+window.addEventListener('resize', ()=>{ initGrid(); });
+
+// Initial demo content
+(function demo(){
+  // put some wood, oil, and a bomb
+  for(let y=gridH-60;y<gridH-10;y++){
+    for(let x=20;x<60;x++){
+      const i = idx(x,y);
+      if(y>gridH-20) typeArr[i]=TYPE.WOOD; else if(y>gridH-30) typeArr[i]=TYPE.OIL; else typeArr[i]=TYPE.EMPTY;
+    }
+  }
+  // create a lava pool
+  for(let x=100;x<140;x++){ typeArr[idx(x,gridH-10)]=TYPE.LAVA; }
+})();
+
+</script>
+</body>
+</html>
