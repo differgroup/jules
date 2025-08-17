@@ -24,7 +24,6 @@ fn fragment(
     let tex_size = vec2<f32>(textureDimensions(t_in));
     let one_px = 1.0 / tex_size;
 
-    // CORRECTED: Call the renamed function
     let center = get_cell(uv);
     let down = get_cell(uv + vec2(0.0, -one_px.y));
     let up = get_cell(uv + vec2(0.0, one_px.y));

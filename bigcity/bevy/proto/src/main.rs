@@ -267,13 +267,17 @@ fn paint_on_texture(
     let Ok(window) = q_window.single() else { return };
 
     if !buttons.pressed(MouseButton::Left) {
-        // --- THIS IS THE CORRECTED PART ---
         text.0 = "".to_string();
-        // --- END OF CORRECTION ---
         return;
     }
 
+    // LOG 1: This will fire once per frame as long as the button is held down.
+    info!("--- Mouse Click Detected ---");
+
     if let Some(cursor_pos) = window.cursor_position() {
+        // LOG 2: Log the raw cursor position in window coordinates.
+        info!("  Raw Cursor Pos: {:?}", cursor_pos);
+
         let window_size = Vec2::new(window.width(), window.height());
         let normalized_pos = cursor_pos / window_size;
 
@@ -282,12 +286,15 @@ fn paint_on_texture(
             (1.0 - normalized_pos.y) * SIMULATION_HEIGHT as f32,
         ).as_uvec2();
 
-        // --- THIS IS THE CORRECTED PART ---
+        // LOG 3: Log the final calculated texture coordinates.
+        // These should be between (0, 0) and (255, 255).
+        info!("  Calculated Tex Coords: {:?}", texture_pos);
+
+
         text.0 = format!(
             "Cursor: {:.1}, {:.1}\nTex Coords: {}, {}",
             cursor_pos.x, cursor_pos.y, texture_pos.x, texture_pos.y
         );
-        // --- END OF CORRECTION ---
 
         if let Some(image) = images.get_mut(&ping_pong.write) {
             if let Some(data) = &mut image.data {
@@ -299,14 +306,18 @@ fn paint_on_texture(
                         if x < SIMULATION_WIDTH && y < SIMULATION_HEIGHT {
                             let i = ((y * SIMULATION_WIDTH + x) * 4) as usize;
                             data[i] = (selected_particle.0.get_color_id() * 255.0) as u8;
+
+                            // LOG 4: (Very verbose!) Uncomment this to see every single pixel being painted.
+                            // info!("    -> Painting pixel at ({}, {}) with index {}", x, y, i);
                         }
                     }
                 }
+            } else {
+                // LOG 5: This will tell us if the image data is not accessible on the CPU.
+                info!("  [ERROR] Image data is not available on the CPU.");
             }
         }
     } else {
-        // --- THIS IS THE CORRECTED PART ---
         text.0 = "Cursor outside window".to_string();
-        // --- END OF CORRECTION ---
     }
 }
